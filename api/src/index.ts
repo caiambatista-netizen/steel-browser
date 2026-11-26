@@ -8,6 +8,7 @@ import { loggingConfig } from "./config.js";
 import { MB } from "./utils/size.js";
 import path from "node:path";
 import type { Duplex } from "node:stream";
+import { isApiKeyValid, presentedApiKey } from "./auth.js";
 
 const HOST = process.env.HOST ?? "0.0.0.0";
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
@@ -20,6 +21,17 @@ export const server = fastify({
   disableRequestLogging: true,
 });
 
+server.addHook("onRequest", async (request, reply) => {
+  const path = request.url.split("?", 1)[0];
+  if (path === "/v1/health") return;
+  const configuredKey = process.env.STEEL_API_KEY;
+  if (!configuredKey) {
+    return reply.code(503).send({ error: "API authentication is not configured" });
+  }
+  if (!isApiKeyValid(presentedApiKey(request.headers), configuredKey)) {
+    return reply.code(401).send({ error: "Unauthorized" });
+  }
+});
 const setupServer = async () => {
   await server.register(fastifySensible);
   await server.register(fastifyCors, { origin: true });
@@ -42,6 +54,13 @@ const setupServer = async () => {
   });
 
   const upgradedSockets = new Set<Duplex>();
+  server.server.prependListener("upgrade", (request, socket) => {
+    const configuredKey = process.env.STEEL_API_KEY;
+    if (!configuredKey || !isApiKeyValid(presentedApiKey(request.headers), configuredKey)) {
+      socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+      socket.destroy();
+    }
+  });
   server.server.on("upgrade", (_request, socket) => {
     upgradedSockets.add(socket);
     socket.once("close", () => upgradedSockets.delete(socket));
